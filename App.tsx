@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useRef } from 'react';
-import { Wand2, Plus, Trash2, Download, History, Sparkles, RotateCcw, Scan, Menu, X, Check, Home, Hammer, Palette, Building, Map, Cuboid, Lightbulb, Ruler, Link as LinkIcon, Settings2, Cloud, Laptop, ThumbsUp, ThumbsDown, ChevronDown, Grid, Moon, Copy } from 'lucide-react';
+import { Wand2, Plus, Trash2, Download, History, Sparkles, RotateCcw, Scan, Menu, X, Check, Home, Hammer, Palette, Building, Map, Cuboid, Lightbulb, Ruler, Link as LinkIcon, Settings2, Cloud, Laptop, ThumbsUp, ThumbsDown, ChevronDown, Grid, Moon, Copy, LogOut, Coins, Loader2 } from 'lucide-react';
 import { Button } from './components/Button';
 import { FileUploader } from './components/FileUploader';
 import { CanvasEditor } from './components/CanvasEditor';
@@ -11,9 +11,11 @@ import { generateArchitecturalView, analyzeArchitecturalImage, generateStyleImag
 import { AppView, LoadingState, TaskType, HistoryItem, HistoryResult } from './types';
 import { useApiKey } from './hooks/useApiKey';
 import ApiKeyDialog from './components/ApiKeyDialog';
-
-const INTERIOR_LINK = "https://drive.google.com/drive/folders/1WxtGa2jdavnvcb4Q7T2p6Wiu99k0dImC?usp=sharing";
-const EXTERIOR_LINK = "https://drive.google.com/drive/folders/1moj-FIcZdsFl-MWR5eOvFRsCqusRkvuC?usp=sharing";
+import { useAuth } from './hooks/useAuth';
+import LoginScreen from './components/LoginScreen';
+import { CREDIT_COSTS, deductCredits, getCreditCost } from './services/credits';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from './services/firebase';
 
 // --- Helper: Aspect Ratio Calculator ---
 const getClosestAspectRatio = (width: number, height: number): string => {
@@ -79,12 +81,12 @@ const IntroSequence = ({ onComplete }: { onComplete: () => void }) => {
             )}
          </div>
          <div className={`text-center transition-all duration-700 ${phase === 'reveal' ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
-            <h1 className="text-5xl md:text-6xl font-bold text-white tracking-tighter mb-3">ARCHI STUDIO</h1>
+            <h1 className="text-5xl md:text-6xl font-bold text-white tracking-tighter mb-3">ARK REAL STUDIO</h1>
             <p className="text-xs text-white/40 font-semibold tracking-[0.5em] uppercase">Suite Architecte IA</p>
          </div>
       </div>
       <div className={`absolute bottom-8 left-0 right-0 text-center transition-opacity duration-1000 ${phase === 'reveal' ? 'opacity-100' : 'opacity-0'}`}>
-         <p className="text-white/20 text-[10px] font-medium tracking-widest uppercase">Marc Antoine Lecomte</p>
+         <p className="text-white/20 text-[10px] font-medium tracking-widest uppercase">&copy; Marc Antoine Lecomte</p>
       </div>
     </div>
   );
@@ -108,6 +110,14 @@ interface WorkspaceProps {
   onClearHistory: () => void;
   onFeedback: (batchId: string, resultId: string, feedback: 'like' | 'dislike') => void;
   onDownload: (url: string, filename: string) => void;
+  // Auth & Credits
+  credits: number;
+  isAdmin: boolean;
+  uid: string | null;
+  onCreditsUpdate: (delta: number) => void;
+  // Liens de référence (chargés depuis Firestore)
+  interiorLink: string;
+  exteriorLink: string;
 }
 
 const PROMPT_PRESETS = [
@@ -120,7 +130,8 @@ const PROMPT_PRESETS = [
 
 const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
   taskType, title, description, history, onGenerate, onUpscale, loading,
-  refImages, setRefImages, projectLink, setProjectLink, onClearHistory, onFeedback, onDownload
+  refImages, setRefImages, projectLink, setProjectLink, onClearHistory, onFeedback, onDownload,
+  credits, isAdmin, uid, onCreditsUpdate, interiorLink, exteriorLink
 }) => {
   const [baseImages, setBaseImages] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
@@ -220,10 +231,19 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 
   const handleAnalyze = async () => {
     if (!activeBaseImage) return;
+    const cost = getCreditCost('analysis');
+    if (!isAdmin && credits < cost) {
+      showWorkspaceError(`Crédits insuffisants. L'analyse coûte ${cost} crédits, il vous en reste ${credits}.`);
+      return;
+    }
     setIsAnalyzing(true);
     setAnalysisResult(null);
     try {
       const result = await analyzeArchitecturalImage(activeBaseImage, prompt);
+      if (!isAdmin && uid) {
+        await deductCredits(uid, 'analysis');
+        onCreditsUpdate(-cost);
+      }
       setAnalysisResult(result);
     } catch (e) {
       console.error(e);
@@ -235,9 +255,18 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 
   const handleGenerateRefs = async () => {
     if (!stylePrompt) return;
+    const cost = getCreditCost('styleGeneration', 3);
+    if (!isAdmin && credits < cost) {
+      showWorkspaceError(`Crédits insuffisants. Cette action coûte ${cost} crédits, il vous en reste ${credits}.`);
+      return;
+    }
     setIsGeneratingRefs(true);
     try {
         const images = await generateStyleImages(stylePrompt, 3);
+        if (!isAdmin && uid) {
+          await deductCredits(uid, 'styleGeneration', 3);
+          onCreditsUpdate(-cost);
+        }
         setRefImages(prev => [...prev, ...images].slice(0, 3));
         setRefMode('upload');
     } catch (e) {
@@ -352,20 +381,20 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
                         <div className="space-y-3 animate-fade-in">
                             <div className="grid grid-cols-2 gap-2">
                                 <button 
-                                    onClick={() => { setProjectMode('online'); setProjectLink(INTERIOR_LINK); }}
-                                    className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-all ${projectLink === INTERIOR_LINK ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-inner' : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                                    onClick={() => { setProjectMode('online'); setProjectLink(interiorLink); }}
+                                    className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-all ${projectLink === interiorLink ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-inner' : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                                 >
                                     <Home size={14} /> Intérieur 3D
                                 </button>
                                 <button 
-                                    onClick={() => { setProjectMode('online'); setProjectLink(EXTERIOR_LINK); }}
-                                    className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-all ${projectLink === EXTERIOR_LINK ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-inner' : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                                    onClick={() => { setProjectMode('online'); setProjectLink(exteriorLink); }}
+                                    className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-all ${projectLink === exteriorLink ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-inner' : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                                 >
                                     <Building size={14} /> Extérieur 3D
                                 </button>
                             </div>
 
-                            {projectLink !== INTERIOR_LINK && projectLink !== EXTERIOR_LINK ? (
+                            {projectLink !== interiorLink && projectLink !== exteriorLink ? (
                                 <div className="flex gap-2 items-center bg-white border border-blue-200 rounded-xl px-3 py-2 shadow-sm">
                                     <LinkIcon size={14} className="text-blue-500 flex-shrink-0" />
                                     <input 
@@ -380,7 +409,7 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
                                 <div className="flex items-center justify-between bg-blue-50 border border-blue-100 px-3 py-2 rounded-xl">
                                     <span className="text-xs text-blue-700 font-medium flex items-center gap-2 truncate">
                                         <Check size={12}/> 
-                                        Source: {projectLink === INTERIOR_LINK ? 'Bibliothèque Intérieur' : 'Bibliothèque Extérieur'}
+                                        Source: {projectLink === interiorLink ? 'Bibliothèque Intérieur' : 'Bibliothèque Extérieur'}
                                     </span>
                                     <button onClick={() => setProjectLink('')} className="text-blue-400 hover:text-blue-700 p-1">
                                         <X size={12}/>
@@ -818,6 +847,7 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 const MAX_HISTORY = 20;
 
 const App: React.FC = () => {
+  const { user, credits, isAdmin, loading: authLoading, logout, setCredits } = useAuth();
   const [showIntro, setShowIntro] = useState(true);
   const [activeTask, setActiveTask] = useState<TaskType>('perspective');
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -825,8 +855,29 @@ const App: React.FC = () => {
   const [refImages, setRefImages] = useState<string[]>([]);
   const [projectLink, setProjectLink] = useState('');
   const [appError, setAppError] = useState<string | null>(null);
+  const [referenceLinks, setReferenceLinks] = useState({ interior: '', exterior: '' });
 
   const { showApiKeyDialog, handleApiKeyDialogContinue } = useApiKey();
+
+  // Charger les liens de référence depuis Firestore (protégés)
+  useEffect(() => {
+    if (!user) return;
+    const fetchLinks = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'config', 'references'));
+        if (snap.exists()) {
+          const data = snap.data();
+          setReferenceLinks({
+            interior: data.interiorLink || '',
+            exterior: data.exteriorLink || '',
+          });
+        }
+      } catch (e) {
+        console.error('Error loading reference links:', e);
+      }
+    };
+    fetchLinks();
+  }, [user]);
 
   const showError = (message: string) => {
     setAppError(message);
@@ -835,11 +886,18 @@ const App: React.FC = () => {
 
   // Handle Generation
   const handleGenerate = async (baseImages: string[], prompt: string, imageSize: string) => {
+      // Vérification des crédits
+      const totalCost = getCreditCost('generation', baseImages.length);
+      if (!isAdmin && credits < totalCost) {
+          showError(`Crédits insuffisants. Cette action coûte ${totalCost} crédits, il vous en reste ${credits}.`);
+          return;
+      }
+
       setLoading({ isGenerating: true, message: 'Génération en cours...' });
-      
+
       const batchId = Date.now().toString();
       const results: HistoryResult[] = [];
-      
+
       try {
           // Process sequentially to avoid rate limits (optional: parallelize if confident)
           for(let i=0; i<baseImages.length; i++) {
@@ -851,21 +909,27 @@ const App: React.FC = () => {
               const dynamicRatio = getClosestAspectRatio(dims.width, dims.height);
 
               const resultImg = await generateArchitecturalView(
-                  activeTask, 
-                  baseImg, 
-                  refImages, 
-                  prompt, 
-                  dynamicRatio, 
-                  imageSize, 
+                  activeTask,
+                  baseImg,
+                  refImages,
+                  prompt,
+                  dynamicRatio,
+                  imageSize,
                   projectLink
               );
-              
+
               results.push({
                   id: `${batchId}-${i}`,
                   baseImage: baseImg,
                   resultImage: resultImg,
                   feedback: null
               });
+          }
+
+          // Déduire les crédits après succès
+          if (!isAdmin && user) {
+              await deductCredits(user.uid, 'generation', baseImages.length);
+              setCredits(prev => prev - totalCost);
           }
 
           const newItem: HistoryItem = {
@@ -876,7 +940,7 @@ const App: React.FC = () => {
               results: results,
               referenceImages: [...refImages]
           };
-          
+
           setHistory(prev => [newItem, ...prev].slice(0, MAX_HISTORY));
 
       } catch (error) {
@@ -890,8 +954,16 @@ const App: React.FC = () => {
   // Handle Upscale (BATCH SUPPORTED)
   const handleUpscale = async (baseImages: string[]) => {
       if(!baseImages || baseImages.length === 0) return;
+
+      // Vérification des crédits
+      const totalCost = getCreditCost('upscale', baseImages.length);
+      if (!isAdmin && credits < totalCost) {
+          showError(`Crédits insuffisants. Cette action coûte ${totalCost} crédits, il vous en reste ${credits}.`);
+          return;
+      }
+
       setLoading({ isGenerating: true, message: 'Upscaling Haute Définition...' });
-      
+
       const batchId = Date.now().toString();
       const results: HistoryResult[] = [];
 
@@ -899,13 +971,13 @@ const App: React.FC = () => {
            for(let i=0; i<baseImages.length; i++) {
               const baseImg = baseImages[i];
               setLoading({ isGenerating: true, message: `Upscaling image ${i+1}/${baseImages.length}...` });
-              
+
               // 1. Detect dynamic ratio per image
               const dims = await getImageDimensions(baseImg);
               const dynamicRatio = getClosestAspectRatio(dims.width, dims.height);
 
               const resultImg = await upscaleArchitecturalImage(baseImg, dynamicRatio);
-              
+
               results.push({
                   id: `${batchId}-${i}`,
                   baseImage: baseImg,
@@ -913,6 +985,12 @@ const App: React.FC = () => {
                   feedback: null
               });
            }
+
+          // Déduire les crédits après succès
+          if (!isAdmin && user) {
+              await deductCredits(user.uid, 'upscale', baseImages.length);
+              setCredits(prev => prev - totalCost);
+          }
 
           const newItem: HistoryItem = {
               id: batchId,
@@ -955,6 +1033,19 @@ const App: React.FC = () => {
       }));
   };
 
+  // Auth gate
+  if (authLoading) {
+    return (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-950">
+        <Loader2 size={32} className="text-white/40 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginScreen />;
+  }
+
   if (showIntro) {
       return <IntroSequence onComplete={() => setShowIntro(false)} />;
   }
@@ -970,7 +1061,7 @@ const App: React.FC = () => {
           <span>{appError}</span>
         </div>
       )}
-      
+
       {/* Sidebar */}
       <aside className="w-[72px] bg-zinc-950 flex flex-col items-center py-5 z-20 shadow-[2px_0_20px_rgba(0,0,0,0.15)]">
           <div className="w-9 h-9 bg-white/10 rounded-xl flex items-center justify-center text-white mb-5 border border-white/10">
@@ -1010,16 +1101,27 @@ const App: React.FC = () => {
             />
           </div>
 
-          <div className="px-2 w-full mb-1">
-            <button className="w-full flex items-center justify-center p-2.5 rounded-xl text-zinc-600 hover:text-zinc-300 hover:bg-white/5 transition-colors">
-              <Menu size={18} />
+          {/* Credits + Logout */}
+          <div className="px-2 w-full space-y-1 mb-1">
+            <div className="flex flex-col items-center gap-0.5 py-2 px-1 rounded-xl bg-white/5 border border-white/5">
+              <Coins size={14} className="text-amber-400/80" />
+              <span className="text-[9px] font-bold text-white/70 tabular-nums">
+                {isAdmin ? '∞' : credits.toLocaleString()}
+              </span>
+            </div>
+            <button
+              onClick={logout}
+              title="Déconnexion"
+              className="w-full flex items-center justify-center p-2.5 rounded-xl text-zinc-600 hover:text-red-400 hover:bg-white/5 transition-colors"
+            >
+              <LogOut size={16} />
             </button>
           </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 min-w-0 relative">
-          <ArchitecturalWorkspace 
+          <ArchitecturalWorkspace
              key={activeTask}
              taskType={activeTask}
              title={getTaskTitle(activeTask)}
@@ -1035,6 +1137,12 @@ const App: React.FC = () => {
              onClearHistory={handleClearHistory}
              onFeedback={handleFeedback}
              onDownload={handleDownload}
+             credits={credits}
+             isAdmin={isAdmin}
+             uid={user.uid}
+             onCreditsUpdate={(delta) => setCredits(prev => prev + delta)}
+             interiorLink={referenceLinks.interior}
+             exteriorLink={referenceLinks.exterior}
           />
       </main>
     </div>
