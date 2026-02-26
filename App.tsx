@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useRef } from 'react';
-import { Wand2, Plus, Trash2, Download, History, Sparkles, RotateCcw, Scan, Menu, X, Check, Home, Hammer, Palette, Building, Map, Cuboid, Lightbulb, Ruler, Link as LinkIcon, Settings2, Cloud, Laptop, ThumbsUp, ThumbsDown, ChevronDown, Grid, Moon, Copy, LogOut, Coins, Loader2 } from 'lucide-react';
+import { Wand2, Plus, Trash2, Download, History, Sparkles, RotateCcw, Scan, Menu, X, Check, Home, Hammer, Palette, Building, Map, Cuboid, Lightbulb, Ruler, Link as LinkIcon, Settings2, Cloud, Laptop, ThumbsUp, ThumbsDown, ChevronDown, Grid, Moon, Copy, LogOut, Loader2 } from 'lucide-react';
 import { Button } from './components/Button';
 import { FileUploader } from './components/FileUploader';
 import { CanvasEditor } from './components/CanvasEditor';
@@ -13,7 +13,6 @@ import { useApiKey } from './hooks/useApiKey';
 import ApiKeyDialog from './components/ApiKeyDialog';
 import { useAuth } from './hooks/useAuth';
 import LoginScreen from './components/LoginScreen';
-import { CREDIT_COSTS, deductCredits, getCreditCost } from './services/credits';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from './services/firebase';
 
@@ -110,11 +109,6 @@ interface WorkspaceProps {
   onClearHistory: () => void;
   onFeedback: (batchId: string, resultId: string, feedback: 'like' | 'dislike') => void;
   onDownload: (url: string, filename: string) => void;
-  // Auth & Credits
-  credits: number;
-  isAdmin: boolean;
-  uid: string | null;
-  onCreditsUpdate: (delta: number) => void;
   // Liens de référence (chargés depuis Firestore)
   interiorLink: string;
   exteriorLink: string;
@@ -131,7 +125,7 @@ const PROMPT_PRESETS = [
 const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
   taskType, title, description, history, onGenerate, onUpscale, loading,
   refImages, setRefImages, projectLink, setProjectLink, onClearHistory, onFeedback, onDownload,
-  credits, isAdmin, uid, onCreditsUpdate, interiorLink, exteriorLink
+  interiorLink, exteriorLink
 }) => {
   const [baseImages, setBaseImages] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
@@ -231,19 +225,10 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 
   const handleAnalyze = async () => {
     if (!activeBaseImage) return;
-    const cost = getCreditCost('analysis');
-    if (!isAdmin && credits < cost) {
-      showWorkspaceError(`Crédits insuffisants. L'analyse coûte ${cost} crédits, il vous en reste ${credits}.`);
-      return;
-    }
     setIsAnalyzing(true);
     setAnalysisResult(null);
     try {
       const result = await analyzeArchitecturalImage(activeBaseImage, prompt);
-      if (!isAdmin && uid) {
-        await deductCredits(uid, 'analysis');
-        onCreditsUpdate(-cost);
-      }
       setAnalysisResult(result);
     } catch (e) {
       console.error(e);
@@ -255,18 +240,9 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 
   const handleGenerateRefs = async () => {
     if (!stylePrompt) return;
-    const cost = getCreditCost('styleGeneration', 3);
-    if (!isAdmin && credits < cost) {
-      showWorkspaceError(`Crédits insuffisants. Cette action coûte ${cost} crédits, il vous en reste ${credits}.`);
-      return;
-    }
     setIsGeneratingRefs(true);
     try {
         const images = await generateStyleImages(stylePrompt, 3);
-        if (!isAdmin && uid) {
-          await deductCredits(uid, 'styleGeneration', 3);
-          onCreditsUpdate(-cost);
-        }
         setRefImages(prev => [...prev, ...images].slice(0, 3));
         setRefMode('upload');
     } catch (e) {
@@ -847,7 +823,7 @@ const ArchitecturalWorkspace: React.FC<WorkspaceProps> = ({
 const MAX_HISTORY = 20;
 
 const App: React.FC = () => {
-  const { user, credits, isAdmin, loading: authLoading, logout, setCredits } = useAuth();
+  const { user, loading: authLoading, logout } = useAuth();
   const [showIntro, setShowIntro] = useState(true);
   const [activeTask, setActiveTask] = useState<TaskType>('perspective');
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -886,13 +862,6 @@ const App: React.FC = () => {
 
   // Handle Generation
   const handleGenerate = async (baseImages: string[], prompt: string, imageSize: string) => {
-      // Vérification des crédits
-      const totalCost = getCreditCost('generation', baseImages.length);
-      if (!isAdmin && credits < totalCost) {
-          showError(`Crédits insuffisants. Cette action coûte ${totalCost} crédits, il vous en reste ${credits}.`);
-          return;
-      }
-
       setLoading({ isGenerating: true, message: 'Génération en cours...' });
 
       const batchId = Date.now().toString();
@@ -926,12 +895,6 @@ const App: React.FC = () => {
               });
           }
 
-          // Déduire les crédits après succès
-          if (!isAdmin && user) {
-              await deductCredits(user.uid, 'generation', baseImages.length);
-              setCredits(prev => prev - totalCost);
-          }
-
           const newItem: HistoryItem = {
               id: batchId,
               taskType: activeTask,
@@ -954,13 +917,6 @@ const App: React.FC = () => {
   // Handle Upscale (BATCH SUPPORTED)
   const handleUpscale = async (baseImages: string[]) => {
       if(!baseImages || baseImages.length === 0) return;
-
-      // Vérification des crédits
-      const totalCost = getCreditCost('upscale', baseImages.length);
-      if (!isAdmin && credits < totalCost) {
-          showError(`Crédits insuffisants. Cette action coûte ${totalCost} crédits, il vous en reste ${credits}.`);
-          return;
-      }
 
       setLoading({ isGenerating: true, message: 'Upscaling Haute Définition...' });
 
@@ -985,12 +941,6 @@ const App: React.FC = () => {
                   feedback: null
               });
            }
-
-          // Déduire les crédits après succès
-          if (!isAdmin && user) {
-              await deductCredits(user.uid, 'upscale', baseImages.length);
-              setCredits(prev => prev - totalCost);
-          }
 
           const newItem: HistoryItem = {
               id: batchId,
@@ -1101,14 +1051,8 @@ const App: React.FC = () => {
             />
           </div>
 
-          {/* Credits + Logout */}
+          {/* Logout */}
           <div className="px-2 w-full space-y-1 mb-1">
-            <div className="flex flex-col items-center gap-0.5 py-2 px-1 rounded-xl bg-white/5 border border-white/5">
-              <Coins size={14} className="text-amber-400/80" />
-              <span className="text-[9px] font-bold text-white/70 tabular-nums">
-                {isAdmin ? '∞' : credits.toLocaleString()}
-              </span>
-            </div>
             <button
               onClick={logout}
               title="Déconnexion"
@@ -1137,10 +1081,6 @@ const App: React.FC = () => {
              onClearHistory={handleClearHistory}
              onFeedback={handleFeedback}
              onDownload={handleDownload}
-             credits={credits}
-             isAdmin={isAdmin}
-             uid={user.uid}
-             onCreditsUpdate={(delta) => setCredits(prev => prev + delta)}
              interiorLink={referenceLinks.interior}
              exteriorLink={referenceLinks.exterior}
           />
